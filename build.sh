@@ -59,6 +59,9 @@ STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 cp "${PLUGIN_FILES[@]}" "$STAGE/"
 touch -d "@$SOURCE_DATE_EPOCH" "$STAGE"/*
+# A zip records each entry's Unix mode in its external attributes, so the
+# builder's umask would otherwise leak into the archive (0664 vs 0644).
+chmod 644 "$STAGE"/*
 
 # -X drops uid/gid and the extra timestamp fields; -D omits directory entries;
 # TZ=UTC keeps the stored DOS timestamps independent of the builder's timezone.

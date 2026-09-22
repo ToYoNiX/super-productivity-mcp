@@ -181,11 +181,14 @@ touch a real install.
 A zip stores each file's modification time, so those are pinned to `SOURCE_DATE_EPOCH` — taken
 from the environment if set, otherwise from the last commit's date, and clamped to 1980-01-01
 because the zip format cannot represent anything earlier. Files are staged in a temporary
-directory before stamping, so your working tree is untouched, and `TZ=UTC` keeps the stored
-timestamps independent of the builder's timezone. Set `SOURCE_DATE_EPOCH` yourself to pin a build
-to a specific time.
+directory before stamping, so your working tree is untouched, `TZ=UTC` keeps the stored timestamps
+independent of the builder's timezone, and entry modes are normalised to `644` so the builder's
+umask does not leak into the archive. Set `SOURCE_DATE_EPOCH` yourself to pin a build to a
+specific time.
 
-Byte-identical output assumes the same `zip` implementation; Info-ZIP 3.0 is what CI uses.
+A local build of a given commit is byte-identical to the one CI produces, verified by comparing
+checksums against the uploaded artifact. This assumes the same `zip` implementation; CI uses
+Info-ZIP 3.0.
 
 CI (`.github/workflows/test-and-build.yml`) runs those suites on Python 3.10, 3.12 and 3.13, then builds
 `plugin.zip` and uploads it as a build artifact. Pushing a `vX.Y.Z` tag additionally checks the tag
