@@ -1,48 +1,47 @@
-import json
-import sys
-import os
+#!/usr/bin/env python3
+"""Merge the Super Productivity MCP server into a Claude Desktop config.
 
-def merge_claude_config(config_file, mcp_dir):
+Usage: merge_config.py <config_file> <server_script> [python_bin]
+"""
+import json
+import os
+import sys
+
+
+def merge_claude_config(config_file, server_script, python_bin):
     backup_file = config_file + '.backup'
-    
+
     try:
-        # Load existing config if it exists
         config = {}
-        if os.path.exists(backup_file):
-            with open(backup_file, 'r') as f:
+        source = backup_file if os.path.exists(backup_file) else config_file
+        if os.path.exists(source):
+            with open(source, 'r') as f:
                 config = json.load(f)
-        elif os.path.exists(config_file):
-            with open(config_file, 'r') as f:
-                config = json.load(f)
-        
-        # Ensure mcpServers exists
-        if 'mcpServers' not in config:
-            config['mcpServers'] = {}
-        
-        # Add or update super-productivity server
+
+        config.setdefault('mcpServers', {})
         config['mcpServers']['super-productivity'] = {
-            'command': 'python',
-            'args': [os.path.join(mcp_dir, 'mcp_server.py')]
+            'command': python_bin,
+            'args': [server_script],
         }
-        
-        # Write back the merged config
+
         with open(config_file, 'w') as f:
             json.dump(config, f, indent=2)
-        
-        print('Successfully merged Super Productivity MCP server into existing configuration')
+
+        print('Successfully merged the Super Productivity MCP server into the configuration')
         return True
-        
+
     except Exception as e:
         print(f'Error merging config: {e}')
         return False
 
+
 if __name__ == '__main__':
-    if len(sys.argv) != 3:
-        print('Usage: python merge_config.py <config_file> <mcp_dir>')
+    if len(sys.argv) not in (3, 4):
+        print('Usage: merge_config.py <config_file> <server_script> [python_bin]')
         sys.exit(1)
-    
-    config_file = sys.argv[1]
-    mcp_dir = sys.argv[2]
-    
-    success = merge_claude_config(config_file, mcp_dir)
-    sys.exit(0 if success else 1)
+
+    config_path = sys.argv[1]
+    script_path = sys.argv[2]
+    interpreter = sys.argv[3] if len(sys.argv) == 4 else 'python3'
+
+    sys.exit(0 if merge_claude_config(config_path, script_path, interpreter) else 1)

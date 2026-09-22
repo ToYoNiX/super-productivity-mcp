@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MCP Bridge - Super Productivity</title>
+    <title>MCP Server - Super Productivity</title>
     <style>
         * {
             margin: 0;
@@ -84,6 +84,8 @@
         .stat {
             display: flex;
             justify-content: space-between;
+            align-items: baseline;
+            gap: 1rem;
             padding: 0.5rem 0;
             border-bottom: 1px solid #404040;
         }
@@ -94,10 +96,16 @@
 
         .stat-label {
             font-weight: 500;
+            flex: 0 0 auto;
         }
 
         .stat-value {
             color: #b0b0b0;
+            /* Filesystem paths have no spaces to break on; allow breaks anywhere
+               so a long one wraps inside the card instead of overrunning it. */
+            text-align: right;
+            min-width: 0;
+            overflow-wrap: anywhere;
         }
 
         .config-section {
@@ -225,6 +233,7 @@
                 flex-direction: column;
                 align-items: stretch;
             }
+
         }
     </style>
 </head>
@@ -303,7 +312,7 @@
                 <h3>📝 Activity Logs</h3>
                 <div class="logs-container" id="logsContainer">
                     <div class="log-entry log-info">
-                        <span class="log-timestamp">[System]</span> MCP Bridge interface loaded
+                        <span class="log-timestamp">[System]</span> MCP Server interface loaded
                     </div>
                 </div>
             </div>
@@ -343,14 +352,16 @@
         function updateBridgeStatus(data) {
             if (data.status) {
                 bridgeStatus.isInitialized = data.status.type === 'connected';
+            } else if (typeof data.isInitialized === 'boolean') {
+                bridgeStatus.isInitialized = data.isInitialized;
             }
             
             if (data.stats) {
                 bridgeStatus.stats = { ...bridgeStatus.stats, ...data.stats };
             }
             
-            if (data.mcpPath) {
-                bridgeStatus.mcpPath = data.mcpPath;
+            if (data.mcpPath || data.mcpServerPath) {
+                bridgeStatus.mcpPath = data.mcpPath || data.mcpServerPath;
             }
             
             if (data.commandDir) {

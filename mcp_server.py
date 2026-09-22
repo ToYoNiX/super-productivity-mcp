@@ -24,25 +24,77 @@ class SuperProductivityMCPServer:
         self.setup_tools()
         
     def setup_directories(self):
-        if os.name == 'nt':  # Windows
-            data_dir = os.environ.get('APPDATA', os.path.expanduser('~/AppData/Roaming'))
-        else:  # Linux/Mac
-            data_dir = os.environ.get('XDG_DATA_HOME', os.path.expanduser('~/.local/share'))
-        
-        self.base_dir = Path(data_dir) / 'super-productivity-mcp'
-        self.command_dir = self.base_dir / 'plugin_commands'
-        self.response_dir = self.base_dir / 'plugin_responses'
-        
-        # Create directories
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.command_dir.mkdir(parents=True, exist_ok=True)
-        self.response_dir.mkdir(parents=True, exist_ok=True)
-        
-        logging.info(f"MCP Server using directory: {self.base_dir}")
-        logging.info(f"Command directory: {self.command_dir}")
-        logging.info(f"Response directory: {self.response_dir}")
-        
-        
+        """Resolve the directory shared with the Super Productivity plugin.
+
+        The plugin runs in a sandbox that cannot read environment variables, so it
+        detects this directory on disk. The same order is used here so both sides
+        agree. Each candidate is probed for writability because the Flatpak build
+        keeps $HOME read-only.
+        """
+        home = Path.home()
+        candidates: List[Path] = []
+
+        # 1. Explicit override, for non-standard installs.
+        env_override = os.environ.get('SP_MCP_DATA_DIR')
+        if env_override:
+            candidates.append(Path(env_override))
+
+        override_file = home / '.config' / 'super-productivity-mcp' / 'data-dir'
+        try:
+            if override_file.is_file():
+                custom = override_file.read_text(encoding='utf-8').strip()
+                if custom:
+                    candidates.append(Path(custom))
+        except OSError:
+            pass
+
+        # 2. Flatpak keeps $HOME read-only; only the app's own data dir is writable.
+        #    Offered only when it already exists, so native installs are unaffected.
+        flatpak_home = home / '.var' / 'app' / 'com.super_productivity.SuperProductivity'
+        if flatpak_home.is_dir():
+            candidates.append(flatpak_home / 'data' / 'super-productivity-mcp')
+
+        # 3. Environment, when set.
+        if os.name == 'nt':
+            env_dir = os.environ.get('APPDATA')
+        else:
+            env_dir = os.environ.get('XDG_DATA_HOME')
+        if env_dir:
+            candidates.append(Path(env_dir) / 'super-productivity-mcp')
+
+        # 4. Native defaults.
+        if os.name == 'nt':
+            candidates.append(home / 'AppData' / 'Roaming' / 'super-productivity-mcp')
+        elif sys.platform == 'darwin':
+            candidates.append(home / 'Library' / 'Application Support' / 'super-productivity-mcp')
+        else:
+            candidates.append(home / '.local' / 'share' / 'super-productivity-mcp')
+
+        attempts = []
+        for base in candidates:
+            try:
+                command_dir = base / 'plugin_commands'
+                response_dir = base / 'plugin_responses'
+                command_dir.mkdir(parents=True, exist_ok=True)
+                response_dir.mkdir(parents=True, exist_ok=True)
+
+                # mkdir can succeed where writing cannot; prove it.
+                probe = base / '.write-probe'
+                probe.write_text('ok', encoding='utf-8')
+                probe.unlink()
+
+                self.base_dir = base
+                self.command_dir = command_dir
+                self.response_dir = response_dir
+                self.dir_attempts = attempts
+                return
+            except OSError as e:
+                attempts.append(f"{base} -> {e}")
+
+        raise RuntimeError(
+            "No writable data directory found. Tried: " + " | ".join(attempts)
+        )
+
     def setup_logging(self):
         log_file = self.base_dir / 'mcp_server.log'
         logging.basicConfig(
@@ -53,6 +105,9 @@ class SuperProductivityMCPServer:
                 logging.StreamHandler(sys.stderr)
             ]
         )
+        logging.info(f"Using data directory: {self.base_dir}")
+        for attempt in getattr(self, 'dir_attempts', []):
+            logging.info(f"Skipped unusable directory: {attempt}")
         
     def setup_tools(self):
         """Set up MCP tools"""
@@ -144,6 +199,25 @@ class SuperProductivityMCPServer:
                             "task_id": {
                                 "type": "string",
                                 "description": "Task ID to complete"
+                            }
+                        },
+                        "required": ["task_id"]
+                    }
+                ),
+                types.Tool(
+                    name="delete_task",
+                    description=(
+                        "Permanently delete a task from Super Productivity. This cannot be "
+                        "undone and also deletes the task's sub-tasks. Requires Super "
+                        "Productivity 15 or higher. Prefer update_task with is_done=true "
+                        "unless the user explicitly asks to delete."
+                    ),
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "task_id": {
+                                "type": "string",
+                                "description": "ID of the task to delete permanently"
                             }
                         },
                         "required": ["task_id"]
@@ -249,6 +323,8 @@ class SuperProductivityMCPServer:
                     result = await self.update_task(arguments)
                 elif name == "complete_and_archive_task":
                     result = await self.complete_and_archive_task(arguments)
+                elif name == "delete_task":
+                    result = await self.delete_task(arguments)
                 elif name == "get_projects":
                     result = await self.get_projects(arguments)
                 elif name == "create_project":
@@ -389,6 +465,14 @@ class SuperProductivityMCPServer:
         # Mark task as done instead of deleting
         return await self.send_command("setTaskDone", taskId=task_id)
     
+    async def delete_task(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Permanently delete a task, including its sub-tasks."""
+        task_id = args.get("task_id")
+        if not task_id:
+            return {"success": False, "error": "task_id is required"}
+
+        return await self.send_command("deleteTask", taskId=task_id)
+
     async def get_projects(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Get all projects"""
         return await self.send_command("getAllProjects")

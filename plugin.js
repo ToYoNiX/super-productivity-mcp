@@ -1,4 +1,4 @@
-// MCP Bridge Plugin for Super Productivity
+// MCP Server plugin for Super Productivity
 
 class MCPBridgePlugin {
   constructor() {
@@ -16,6 +16,9 @@ class MCPBridgePlugin {
       mcpResponseDir: null,         // Will be set during initialization
       debugMode: true,
       maxConcurrentCommands: 5,
+      // Hook events are written to disk but nothing reads them, so they are
+      // capped. 0 disables writing them at all.
+      maxEventFiles: 50,
       configFile: null              // Will be set to store settings
     };
 
@@ -61,6 +64,9 @@ class MCPBridgePlugin {
       if (result && result.success && result.result && result.result.success) {
         const savedConfig = result.result.config;
         this.config.commandCheckIntervalMs = savedConfig.commandCheckIntervalMs || 2000;
+        if (typeof savedConfig.maxEventFiles === 'number') {
+          this.config.maxEventFiles = savedConfig.maxEventFiles;
+        }
         return true;
       }
     } catch (error) {
@@ -72,7 +78,8 @@ class MCPBridgePlugin {
   async saveConfig() {
     try {
       const configData = {
-        commandCheckIntervalMs: this.config.commandCheckIntervalMs
+        commandCheckIntervalMs: this.config.commandCheckIntervalMs,
+        maxEventFiles: this.config.maxEventFiles
       };
       
       const result = await PluginAPI.executeNodeScript({
@@ -121,7 +128,7 @@ class MCPBridgePlugin {
   }
 
   async init() {
-    await this.log('MCP Bridge Plugin initializing...');
+    await this.log('MCP Server plugin initializing...');
     
     try {
       // Find the MCP server and set up communication directories
@@ -130,6 +137,9 @@ class MCPBridgePlugin {
       // Set config file path and load configuration (non-blocking)
       this.config.configFile = this.mcpServerPath + '/mcp_bridge_config.json';
       this.loadConfig().catch(e => this.log(`Config loading failed: ${e.message}`));
+      
+      // Clear any event files left behind by earlier runs.
+      this.pruneEventFiles().catch(e => this.log(`Event cleanup failed: ${e.message}`));
       
       // Start the command processing loop
       this.startCommandProcessing();
@@ -141,10 +151,10 @@ class MCPBridgePlugin {
       this.registerUI();
       
       this.isInitialized = true;
-      await this.log('MCP Bridge Plugin initialized successfully!');
+      await this.log('MCP Server plugin initialized successfully!');
       
       // Log success (skip notifications for now)
-      console.log('🔗 MCP Bridge connected! Ready for commands.');
+      console.log('🔗 MCP Server connected! Ready for commands.');
       
       // Send initialization status to UI
       this.updateUI({
@@ -159,116 +169,119 @@ class MCPBridgePlugin {
       
     } catch (error) {
       await this.log(`Failed to initialize: ${error.message}`);
-      console.error('MCP Bridge failed:', error.message);
+      console.error('MCP Server failed:', error.message);
       this.updateUI({
         status: { type: 'disconnected', message: `❌ ${error.message}` }
       });
     }
   }
 
+  /**
+   * Resolve the directory shared with the MCP server.
+   *
+   * Super Productivity runs plugin scripts in a VM sandbox that exposes only
+   * fs/path/os - there is no `process` object - so the data directory cannot be
+   * read from XDG_DATA_HOME. It is probed on disk instead, and each candidate is
+   * tested for writability: the Flatpak build mounts $HOME read-only, so a path
+   * there can be created-looking yet impossible to write.
+   */
   async setupMCPCommunication() {
-    // First try to use AppData directory
-    try {
-      const result = await PluginAPI.executeNodeScript({
-        script: `
+    const result = await PluginAPI.executeNodeScript({
+      script: `
+        const fs = require('fs');
+        const path = require('path');
+        const os = require('os');
+
+        const home = os.homedir();
+        const platform = os.platform();
+        const candidates = [];
+
+        // Explicit override written by setup.sh, for non-standard installs.
+        try {
+          const overrideFile = path.join(home, '.config', 'super-productivity-mcp', 'data-dir');
+          if (fs.existsSync(overrideFile)) {
+            const custom = fs.readFileSync(overrideFile, 'utf8').trim();
+            if (custom) candidates.push(custom);
+          }
+        } catch (err) {
+          // An unreadable override is not fatal; fall through to detection.
+        }
+
+        // Flatpak: $HOME is read-only, only the app's own data dir can be written.
+        // Only offered when the app dir already exists, so native installs are
+        // not given a bogus ~/.var path.
+        const flatpakHome = path.join(home, '.var', 'app', 'com.super_productivity.SuperProductivity');
+        if (fs.existsSync(flatpakHome)) {
+          candidates.push(path.join(flatpakHome, 'data', 'super-productivity-mcp'));
+        }
+
+        // A real environment is available when the script is run in a child
+        // process rather than the in-process VM sandbox.
+        if (typeof process !== 'undefined' && process.env) {
+          const envDir = platform === 'win32' ? process.env.APPDATA : process.env.XDG_DATA_HOME;
+          if (envDir) candidates.push(path.join(envDir, 'super-productivity-mcp'));
+        }
+
+        // Native installs.
+        if (platform === 'win32') {
+          candidates.push(path.join(home, 'AppData', 'Roaming', 'super-productivity-mcp'));
+        } else if (platform === 'darwin') {
+          candidates.push(path.join(home, 'Library', 'Application Support', 'super-productivity-mcp'));
+        } else {
+          candidates.push(path.join(home, '.local', 'share', 'super-productivity-mcp'));
+        }
+
+        const attempts = [];
+        for (const base of candidates) {
           try {
-            const fs = require('fs');
-            const path = require('path');
-            const os = require('os');
-            
-            let dataDir;
-            if (os.platform() === 'win32') {
-              dataDir = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-            } else {
-              dataDir = process.env.XDG_DATA_HOME || path.join(os.homedir(), '.local', 'share');
-            }
-            
-            const mcpDir = path.join(dataDir, 'super-productivity-mcp');
-            const commandDir = path.join(mcpDir, 'plugin_commands');
-            const responseDir = path.join(mcpDir, 'plugin_responses');
-            
-            if (!fs.existsSync(mcpDir)) {
-              fs.mkdirSync(mcpDir, { recursive: true });
-            }
-            if (!fs.existsSync(commandDir)) {
-              fs.mkdirSync(commandDir, { recursive: true });
-            }
-            if (!fs.existsSync(responseDir)) {
-              fs.mkdirSync(responseDir, { recursive: true });
-            }
-            
+            const commandDir = path.join(base, 'plugin_commands');
+            const responseDir = path.join(base, 'plugin_responses');
+            fs.mkdirSync(commandDir, { recursive: true });
+            fs.mkdirSync(responseDir, { recursive: true });
+
+            // mkdir can succeed on a stale directory; only a write proves usability.
+            const probe = path.join(base, '.write-probe');
+            fs.writeFileSync(probe, 'ok');
+            fs.unlinkSync(probe);
+
             return {
               success: true,
-              mcpServerPath: mcpDir,
+              mcpServerPath: base,
               commandDir: commandDir,
               responseDir: responseDir,
-              platform: os.platform()
+              platform: platform,
+              attempts: attempts
             };
-            
-          } catch (error) {
-            return {
-              success: false,
-              error: error.message
-            };
+          } catch (err) {
+            attempts.push(base + ' -> ' + err.message);
           }
-        `,
-        args: [],
-        timeout: 10000
-      });
-      
-      let scriptResult = result;
-      if (result && result.success && result.result) {
-        scriptResult = result.result;
-      }
-      
-      if (scriptResult && scriptResult.success) {
-        this.mcpServerPath = scriptResult.mcpServerPath;
-        this.config.mcpCommandDir = scriptResult.commandDir;
-        this.config.mcpResponseDir = scriptResult.responseDir;
-        return;
-      } else {
-        await this.log('AppData setup failed, trying fallback method');
-      }
-    } catch (e) {
-      await this.log(`AppData setup failed: ${e.message}`);
+        }
+
+        return {
+          success: false,
+          error: 'No writable data directory found. Tried: ' + attempts.join(' | '),
+          attempts: attempts
+        };
+      `,
+      args: [],
+      timeout: 10000
+    });
+
+    let scriptResult = result;
+    if (result && result.success && result.result) {
+      scriptResult = result.result;
     }
-    
-    try {
-      const fallbackResult = await PluginAPI.executeNodeScript({
-        script: `
-          const os = require('os');
-          const path = require('path');
-          
-          let baseDir;
-          if (os.platform() === 'win32') {
-            baseDir = path.join(os.homedir(), 'AppData', 'Roaming', 'super-productivity-mcp');
-          } else {
-            baseDir = path.join(os.homedir(), '.local', 'share', 'super-productivity-mcp');
-          }
-          
-          return {
-            success: true,
-            mcpServerPath: baseDir,
-            commandDir: path.join(baseDir, 'plugin_commands'),
-            responseDir: path.join(baseDir, 'plugin_responses')
-          };
-        `,
-        args: [],
-        timeout: 5000
-      });
-      
-      if (fallbackResult && fallbackResult.success && fallbackResult.result) {
-        this.mcpServerPath = fallbackResult.result.mcpServerPath;
-        this.config.mcpCommandDir = fallbackResult.result.commandDir;
-        this.config.mcpResponseDir = fallbackResult.result.responseDir;
-        return;
-      }
-    } catch (fallbackError) {
-      await this.log(`Fallback setup failed: ${fallbackError.message}`);
+
+    if (!scriptResult || !scriptResult.success) {
+      const detail = (scriptResult && scriptResult.error) || 'unknown error';
+      await this.log(`Data directory setup failed: ${detail}`);
+      throw new Error(`Could not set up MCP communication directories. ${detail}`);
     }
-    
-    // If we get here, everything failed
-    throw new Error('Could not set up MCP communication directories');
+
+    this.mcpServerPath = scriptResult.mcpServerPath;
+    this.config.mcpCommandDir = scriptResult.commandDir;
+    this.config.mcpResponseDir = scriptResult.responseDir;
+    await this.log(`Using data directory: ${this.mcpServerPath}`);
   }
 
 
@@ -492,13 +505,17 @@ class MCPBridgePlugin {
           
         case 'deleteTask':
         case 'removeTask':
-          // Task deletion is not supported via Plugin API
-          // We can only archive tasks by marking them as done and moving to archive
-          result = { 
-            success: false, 
-            error: 'Task deletion not supported. Use updateTask to mark as done instead.',
-            suggestion: 'Use updateTask with {isDone: true} to complete the task'
-          };
+          // Supported since Super Productivity 15. Deletes sub-tasks with the
+          // parent, and cannot be undone.
+          if (typeof PluginAPI.deleteTask !== 'function') {
+            result = {
+              success: false,
+              error: 'Task deletion requires Super Productivity 15 or higher.'
+            };
+            break;
+          }
+          await PluginAPI.deleteTask(command.taskId);
+          result = { deleted: true, taskId: command.taskId };
           break;
 
         case 'setTaskDone':
@@ -790,7 +807,7 @@ class MCPBridgePlugin {
   registerUI() {
     // Register menu entry only (no header button to avoid duplicates)
     PluginAPI.registerMenuEntry({
-      label: 'MCP Bridge Dashboard',
+      label: 'MCP Server',
       icon: 'dashboard',
       onClick: () => {
         PluginAPI.showIndexHtmlAsView();
@@ -799,8 +816,59 @@ class MCPBridgePlugin {
 
   }
 
+  /**
+   * Drop stale hook-event files left by earlier runs.
+   *
+   * Without this an install that accumulated events before the cap existed - or
+   * one that has events disabled entirely - would keep them forever.
+   */
+  async pruneEventFiles() {
+    if (!this.config.mcpResponseDir) return;
+
+    try {
+      const result = await PluginAPI.executeNodeScript({
+        script: `
+          const fs = require('fs');
+          const path = require('path');
+          
+          const responseDir = args[0];
+          const keep = args[1];
+          
+          try {
+            let removed = 0;
+            const events = fs.readdirSync(responseDir)
+              .filter(function (f) { return f.indexOf('_event.json') !== -1; })
+              .sort();
+            for (let i = 0; i < events.length - keep; i++) {
+              try {
+                fs.unlinkSync(path.join(responseDir, events[i]));
+                removed++;
+              } catch (err) {
+                // Already gone; nothing to do.
+              }
+            }
+            return { success: true, removed: removed, remaining: Math.min(events.length, keep) };
+          } catch (error) {
+            return { success: false, error: error.message };
+          }
+        `,
+        args: [this.config.mcpResponseDir, this.config.maxEventFiles],
+        timeout: 5000
+      });
+
+      const r = (result && result.result) || result;
+      if (r && r.success && r.removed > 0) {
+        await this.log(`Removed ${r.removed} stale event file(s)`);
+      }
+    } catch (error) {
+      await this.log(`Event file cleanup failed: ${error.message}`);
+    }
+  }
+
   async sendEventToMCP(eventType, eventData) {
     if (!this.isInitialized || !this.config.mcpResponseDir) return;
+    // Writing is opt-out: with no consumer, the files are pure accumulation.
+    if (!this.config.maxEventFiles) return;
     
     try {
       const timestamp = Date.now();
@@ -814,11 +882,28 @@ class MCPBridgePlugin {
           const responseDir = args[0];
           const eventFile = args[1];
           const eventData = args[2];
+          const keep = args[3];
           
           try {
             const filePath = path.join(responseDir, eventFile);
             fs.writeFileSync(filePath, JSON.stringify(eventData, null, 2));
-            return { success: true, file: filePath };
+            
+            // Keep only the newest \`keep\` events. Names begin with an epoch
+            // millisecond stamp of equal width, so a plain sort is chronological.
+            let removed = 0;
+            const events = fs.readdirSync(responseDir)
+              .filter(function (f) { return f.indexOf('_event.json') !== -1; })
+              .sort();
+            for (let i = 0; i < events.length - keep; i++) {
+              try {
+                fs.unlinkSync(path.join(responseDir, events[i]));
+                removed++;
+              } catch (err) {
+                // Already gone; nothing to do.
+              }
+            }
+            
+            return { success: true, file: filePath, removed: removed };
           } catch (error) {
             return { success: false, error: error.message };
           }
@@ -828,7 +913,7 @@ class MCPBridgePlugin {
           eventData: eventData,
           timestamp: timestamp,
           source: 'super-productivity'
-        }],
+        }, this.config.maxEventFiles],
         timeout: 5000
       });
       
@@ -859,6 +944,11 @@ class MCPBridgePlugin {
   getStatus() {
     return {
       isInitialized: this.isInitialized,
+      status: {
+        type: this.isInitialized ? 'connected' : 'initializing',
+        message: this.isInitialized ? 'Connected and ready' : 'Starting up'
+      },
+      mcpPath: this.mcpServerPath,
       mcpServerPath: this.mcpServerPath,
       commandDir: this.config.mcpCommandDir,
       responseDir: this.config.mcpResponseDir,
@@ -883,13 +973,13 @@ class MCPBridgePlugin {
       this.commandWatchInterval = null;
     }
     
-    await this.log('MCP Bridge Plugin cleaned up');
+    await this.log('MCP Server plugin cleaned up');
   }
 
   async log(message) {
     if (this.config.debugMode) {
       const timestamp = new Date().toISOString();
-      console.log(`[${timestamp}] MCP Bridge: ${message}`);
+      console.log(`[${timestamp}] MCP Server: ${message}`);
       
       // Send to UI
       this.updateUI({

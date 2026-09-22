@@ -1,127 +1,118 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
 
 echo "============================================"
-echo "Super Productivity MCP Bridge Setup"
+echo "Super Productivity MCP Server - Setup"
 echo "============================================"
 echo
 
-# Check if Python is installed
+# --- Python -----------------------------------------------------------------
 if ! command -v python3 &> /dev/null; then
-    echo "ERROR: Python 3 is not installed or not in PATH"
-    echo "Please install Python 3.8 or higher"
+    echo "ERROR: python3 is not installed or not in PATH"
+    echo "Please install Python 3.10 or higher"
     exit 1
 fi
 
-# Check if pip is available
-if ! command -v pip3 &> /dev/null; then
-    echo "ERROR: pip3 is not installed or not in PATH"
-    echo "Please ensure pip3 is installed with Python"
+PY_OK=$(python3 -c 'import sys; print(1 if sys.version_info >= (3, 10) else 0)')
+if [ "$PY_OK" != "1" ]; then
+    echo "ERROR: Python 3.10 or higher is required (found $(python3 -V 2>&1))"
     exit 1
 fi
 
-echo "Installing MCP dependencies..."
-pip3 install mcp
+# --- Install location -------------------------------------------------------
+# The server code lives here. This is NOT the directory shared with the plugin;
+# that one is detected at runtime (see README).
+INSTALL_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-productivity-mcp"
+mkdir -p "$INSTALL_DIR"
 
-if [ $? -ne 0 ]; then
-    echo "ERROR: Failed to install MCP dependencies"
-    exit 1
+echo "Installing server to: $INSTALL_DIR"
+cp mcp_server.py "$INSTALL_DIR/mcp_server.py"
+cp plugin.zip "$INSTALL_DIR/plugin.zip" 2>/dev/null || true
+
+# --- Virtual environment ----------------------------------------------------
+# A venv avoids "externally-managed-environment" errors on modern distros and
+# pins the mcp package, which must stay on 1.x (2.x removed the low-level API
+# this server is built on).
+echo "Creating virtual environment..."
+python3 -m venv "$INSTALL_DIR/venv"
+"$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
+echo "Installing dependencies..."
+"$INSTALL_DIR/venv/bin/pip" install --quiet -r requirements.txt
+
+PYTHON_BIN="$INSTALL_DIR/venv/bin/python"
+SERVER_PATH="$INSTALL_DIR/mcp_server.py"
+
+# --- Report the detected shared directory -----------------------------------
+echo
+echo "Detecting the directory shared with Super Productivity..."
+DATA_DIR=$("$PYTHON_BIN" - "$SERVER_PATH" << 'PYEOF'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("sp_mcp", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+srv = mod.SuperProductivityMCPServer.__new__(mod.SuperProductivityMCPServer)
+srv.setup_directories()
+print(srv.base_dir)
+PYEOF
+)
+echo "  -> $DATA_DIR"
+if [[ "$DATA_DIR" == *"/.var/app/com.super_productivity.SuperProductivity/"* ]]; then
+    echo "  (Flatpak install detected)"
 fi
 
-# Create data directory
-if [[ "$OSTYPE" == "darwin"* ]]; then
-    # macOS
-    MCP_DIR="$HOME/Library/Application Support/super-productivity-mcp"
-    CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
-else
-    # Linux
-    MCP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/super-productivity-mcp"
-    CLAUDE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/Claude/claude_desktop_config.json"
-fi
+# --- Register with a Claude client ------------------------------------------
+echo
+REGISTERED=0
 
-echo "Creating MCP directory: $MCP_DIR"
-mkdir -p "$MCP_DIR"
-mkdir -p "$MCP_DIR/plugin_commands"
-mkdir -p "$MCP_DIR/plugin_responses"
-
-# Copy MCP server to data directory
-echo "Copying MCP server..."
-cp mcp_server.py "$MCP_DIR/mcp_server.py"
-cp merge_config_unix.py "$MCP_DIR/merge_config_unix.py"
-chmod +x "$MCP_DIR/mcp_server.py"
-
-# Create start script
-echo "Creating start script..."
-cat > "$MCP_DIR/start_mcp_server.sh" << EOF
-#!/bin/bash
-echo "Starting Super Productivity MCP Server..."
-cd "$MCP_DIR"
-python3 mcp_server.py
-read -p "Press Enter to exit..."
-EOF
-chmod +x "$MCP_DIR/start_mcp_server.sh"
-
-# Configure Claude Desktop
-echo "Configuring Claude Desktop..."
-
-# Create Claude config directory if it doesn't exist
-mkdir -p "$(dirname "$CLAUDE_CONFIG")"
-
-# Check if config file exists and merge
-if [ -f "$CLAUDE_CONFIG" ]; then
-    echo "Backing up existing Claude config..."
-    cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.backup"
-    
-    echo "Adding super-productivity to existing MCP servers..."
-    echo "Merging with existing Claude Desktop configuration..."
-    
-    python3 "$MCP_DIR/merge_config_unix.py" "$CLAUDE_CONFIG" "$MCP_DIR"
-    
-    if [ $? -ne 0 ]; then
-        echo "ERROR: Failed to merge configuration. Your backup is at $CLAUDE_CONFIG.backup"
-        echo "Please manually add this to your Claude Desktop config:"
-        echo
-        echo '  "super-productivity": {'
-        echo '    "command": "python3",'
-        echo '    "args": ["'$MCP_DIR'/mcp_server.py"]'
-        echo '  }'
-        echo
-        echo "Press Enter to continue..."
-        read
-        exit 1
+if command -v claude &> /dev/null; then
+    echo "Registering with Claude Code..."
+    if claude mcp add super-productivity -s user -- "$PYTHON_BIN" "$SERVER_PATH"; then
+        REGISTERED=1
+    else
+        echo "  Could not register automatically (it may already exist)."
+        echo "  To replace it:  claude mcp remove super-productivity -s user"
     fi
-else
-    echo "Creating new Claude Desktop configuration..."
-    cat > "$CLAUDE_CONFIG" << EOF
-{
-  "mcpServers": {
-    "super-productivity": {
-      "command": "python3",
-      "args": ["$MCP_DIR/mcp_server.py"]
-    }
-  }
-}
-EOF
 fi
 
-echo
-echo "============================================"
-echo "Setup Complete!"
-echo "============================================"
-echo
-echo "Next steps:"
-echo "1. Install the plugin in Super Productivity:"
-echo "   - Open Super Productivity"
-echo "   - Go to Settings > Plugins"
-echo "   - Click \"Upload Plugin\""
-echo "   - Select the plugin.js file from this folder"
-echo
-echo "2. Restart Claude Desktop to load the MCP server"
-echo
-echo "3. Test the integration by asking Claude to:"
-echo "   \"Create a task in Super Productivity\""
-echo
-echo "MCP Server installed at: $MCP_DIR"
-echo "Claude config updated at: $CLAUDE_CONFIG"
-echo
-echo "Press Enter to exit..."
-read
+CLAUDE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/Claude/claude_desktop_config.json"
+if [[ "$OSTYPE" == "darwin"* ]]; then
+    CLAUDE_CONFIG="$HOME/Library/Application Support/Claude/claude_desktop_config.json"
+fi
+
+if [ -f "$CLAUDE_CONFIG" ]; then
+    echo "Configuring Claude Desktop..."
+    cp "$CLAUDE_CONFIG" "$CLAUDE_CONFIG.backup"
+    if python3 merge_config.py "$CLAUDE_CONFIG" "$SERVER_PATH" "$PYTHON_BIN"; then
+        REGISTERED=1
+    else
+        echo "ERROR: Failed to merge configuration. Backup at $CLAUDE_CONFIG.backup"
+    fi
+fi
+
+if [ "$REGISTERED" != "1" ]; then
+    echo "No Claude client was configured automatically. Add this manually:"
+    echo
+    echo '  "super-productivity": {'
+    echo "    \"command\": \"$PYTHON_BIN\","
+    echo "    \"args\": [\"$SERVER_PATH\"]"
+    echo '  }'
+fi
+
+# --- Done -------------------------------------------------------------------
+cat <<EOF
+
+============================================
+Setup complete
+============================================
+
+Next steps:
+1. Install the plugin in Super Productivity:
+     Settings > Plugins > Upload Plugin
+     Select: $INSTALL_DIR/plugin.zip
+2. Grant the plugin the "nodeExecution" permission and enable it.
+3. Restart Super Productivity, then restart your Claude client.
+
+Server:      $SERVER_PATH
+Shared dir:  $DATA_DIR
+Log file:    $DATA_DIR/mcp_server.log
+EOF

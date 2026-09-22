@@ -25,7 +25,7 @@ if %errorlevel% neq 0 (
 )
 
 echo Installing MCP dependencies...
-pip install mcp
+pip install -r requirements.txt
 
 if %errorlevel% neq 0 (
     echo ERROR: Failed to install MCP dependencies
@@ -73,7 +73,7 @@ if exist "%CLAUDE_CONFIG%" (
     echo.
     echo Merging with existing Claude Desktop configuration...
     
-    python "%MCP_DIR%\merge_config.py" "%CLAUDE_CONFIG%" "%MCP_DIR%"
+    python "%MCP_DIR%\merge_config.py" "%CLAUDE_CONFIG%" "%MCP_DIR%\mcp_server.py" python
     
     if %errorlevel% neq 0 (
         echo ERROR: Failed to merge configuration. Your backup is at %CLAUDE_CONFIG%.backup

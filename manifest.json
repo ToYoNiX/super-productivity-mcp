@@ -1,20 +1,40 @@
 {
   "id": "sp-mcp-bridge",
-  "name": "MCP Bridge",
-  "description": "Bridge between Super Productivity and MCP (Model Context Protocol) servers for Claude Desktop integration",
-  "version": "1.0.0",
+  "name": "MCP Server",
+  "description": "MCP (Model Context Protocol) server bridge for Super Productivity - lets Claude read and manage your tasks, projects and tags",
+  "version": "1.4.0",
   "manifestVersion": 1,
-  "author": "Super Productivity Team",
-  "homepage": "https://github.com/johannesjo/super-productivity",
-  "minSupVersion": "14.0.0",
-  "permissions": ["nodeExecution"],
+  "author": "ToYoNiX",
+  "homepage": "https://github.com/ToYoNiX/super-productivity-mcp",
+  "minSupVersion": "15.0.0",
+  "permissions": [
+    "nodeExecution"
+  ],
   "icon": "icon.svg",
-  "categories": ["integration", "automation"],
-  "tags": ["mcp", "claude", "ai", "integration"],
+  "categories": [
+    "integration",
+    "automation"
+  ],
+  "tags": [
+    "mcp",
+    "claude",
+    "ai",
+    "integration"
+  ],
   "iFrame": true,
   "isSkipMenuEntry": true,
-  "hooks": ["taskUpdate", "taskComplete", "taskDelete", "currentTaskChange"],
+  "hooks": [
+    "taskUpdate",
+    "taskComplete",
+    "taskDelete",
+    "currentTaskChange"
+  ],
   "changelog": {
-    "1.0.0": "Initial release with full MCP bridge functionality"
+    "1.0.0": "Initial release with full MCP bridge functionality",
+    "1.1.0": "Flatpak support (writability-probed data directory), dashboard renamed to MCP Server, dashboard path/status display fixed",
+    "1.2.0": "Real task deletion via PluginAPI.deleteTask (Super Productivity 15+)",
+    "1.3.0": "Dashboard: long paths wrap inside their card instead of colliding with labels",
+    "1.3.1": "Fix 1.3.0 layout regression (stray columns on wide windows, values pushed to their own line)",
+    "1.4.0": "Hook event files are capped (default 50) and swept at startup instead of accumulating forever"
   }
 }
