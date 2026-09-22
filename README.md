@@ -177,6 +177,16 @@ reproduces the sandbox faithfully, including the absence of a `process` object. 
 against a throwaway `HOME` and aborts if directory resolution ever escapes it, so it can never
 touch a real install.
 
+`plugin.zip` is built reproducibly: the same commit always produces a byte-identical archive.
+A zip stores each file's modification time, so those are pinned to `SOURCE_DATE_EPOCH` — taken
+from the environment if set, otherwise from the last commit's date, and clamped to 1980-01-01
+because the zip format cannot represent anything earlier. Files are staged in a temporary
+directory before stamping, so your working tree is untouched, and `TZ=UTC` keeps the stored
+timestamps independent of the builder's timezone. Set `SOURCE_DATE_EPOCH` yourself to pin a build
+to a specific time.
+
+Byte-identical output assumes the same `zip` implementation; Info-ZIP 3.0 is what CI uses.
+
 CI (`.github/workflows/test-and-build.yml`) runs those suites on Python 3.10, 3.12 and 3.13, then builds
 `plugin.zip` and uploads it as a build artifact. Pushing a `vX.Y.Z` tag additionally checks the tag
 matches `manifest.json` and attaches `plugin.zip` to a GitHub release — so you can download a built

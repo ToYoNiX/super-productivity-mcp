@@ -77,6 +77,18 @@ jobs:
           fi
           ./build.sh
 
+      - name: Verify the build is reproducible
+        # Building the same commit twice must yield byte-identical archives.
+        run: |
+          A=$(sha256sum plugin.zip | cut -d' ' -f1)
+          ./build.sh > /dev/null
+          B=$(sha256sum plugin.zip | cut -d' ' -f1)
+          if [ "$A" != "$B" ]; then
+            echo "::error::build is not reproducible: $A != $B"
+            exit 1
+          fi
+          echo "reproducible: $A"
+
       - uses: actions/upload-artifact@v4
         with:
           name: plugin-zip
